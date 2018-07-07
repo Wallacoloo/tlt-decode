@@ -1,0 +1,10 @@
+[package]
+name = "tlt-decrypt-rs"
+version = "0.1.0"
+authors = ["Colin Wallace <colin@mooooo.ooo>"]
+
+[dependencies]
+euclid = "0.18"
+image = "0.19"
+imageproc = "0.15"
+lazy_static = "1.0"
