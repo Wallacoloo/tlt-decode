@@ -1,5 +1,6 @@
 #![feature(nll)] // non-lexical lifetimes
 extern crate ansi_term;
+extern crate base64;
 extern crate euclid;
 extern crate image;
 extern crate imageproc;
@@ -7,6 +8,7 @@ extern crate imageproc;
 extern crate lazy_static;
 extern crate ordered_float;
 extern crate rect_iter;
+extern crate sha2;
 
 use ansi_term::{
     ANSIStrings,
@@ -26,11 +28,12 @@ use imageproc::{
 };
 use ordered_float::NotNan;
 use rect_iter::RectRange;
+use sha2::{Sha256, Digest};
 
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    fs::DirBuilder,
+    fs::{DirBuilder, read_dir},
     io::stdin,
     ops::Deref,
     path::{Path, PathBuf}
@@ -40,13 +43,13 @@ use std::{
 lazy_static! {
     static ref WORK_DIR: PathBuf = Path::new("intermediate").into();
     static ref SEGMENTS_DIR: PathBuf = WORK_DIR.join("segments");
+    static ref KNOWN_GLYPHS_DIR: PathBuf = WORK_DIR.join("known_glyphs");
 }
 /// Unicode 'full block' character, i.e. a solid [black] rectangle.
 const UNICODE_FULL_BLOCK: &str = "█";
 /// Minimum confidence needed to classify a glyph.
 const MIN_CONFIDENCE: f32 = 0.998;
 
-#[derive(Default)]
 struct GlyphClassifier {
     /// Pairs of images with the corresponding string of text they represent.
     known_glyphs: Vec<(GrayImage, String)>
@@ -110,8 +113,41 @@ fn correlate_im(ref_im: &GrayImage, im: &GrayImage, x_shift: i32, y_shift: i32) 
 }
 
 impl GlyphClassifier {
+    fn new() -> Self {
+        let images = read_dir(&*KNOWN_GLYPHS_DIR)
+            .expect("error reading glyph directory")
+            // unwrap Iter<Item=Result<DirEntry>> to Iter<Item=DirEntry>
+            .map(|dir_entry| dir_entry.expect("error reading glyph directory"))
+            // map Iter<Item=DirEntry> to Iter<Item=(GrayImage, String)>
+            .map(|dir_entry| {
+                // Parse glyph_name from "<glyph_name>.<sha>.png".
+                let glyph_name = dir_entry.file_name()
+                    .into_string()
+                    .unwrap()
+                    .split('.')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                let image = image::open(dir_entry.path())
+                    .expect("Unable to open glyph")
+                    .to_luma();
+                (image, glyph_name)
+            });
+        // TODO: for now, discard empty glyphs.
+        // In the future, we can require they be an exact match.
+        let images = images.filter(|(_, name)| !name.is_empty());
+        Self {
+            known_glyphs: images.collect()
+        }
+    }
     /// Make future images similar to this one decode to the given string.
     fn associate_image(&mut self, im: GrayImage, s: String) {
+        let mut hasher = Sha256::default();
+        hasher.input(&im);
+        let hash = base64::encode_config(&hasher.result(), base64::URL_SAFE);
+        let name = KNOWN_GLYPHS_DIR.join(format!("{}.{}.png", s, hash));
+        println!("Saving new image association to {:?}", name);
+        im.save(name).expect("failed to save glyph association");
         self.known_glyphs.push((im, s));
     }
     fn have_user_label_image(&mut self, im: GrayImage) -> String {
@@ -120,9 +156,7 @@ impl GlyphClassifier {
         let mut decoded = String::new();
         stdin().read_line(&mut decoded).expect("unable to read stdin");
         decoded = decoded.trim().to_owned();
-        if !decoded.is_empty() {
-            self.associate_image(im, decoded.clone());
-        }
+        self.associate_image(im, decoded.clone());
         decoded
     }
     /// Match the glyph against all the previously labeled images and return
@@ -144,7 +178,7 @@ impl GlyphClassifier {
     fn label_page<P: AsRef<Path>>(&mut self, file: P) -> String {
         println!("loading {:?}", file.as_ref());
         let mut im = image::open(file)
-            .expect("Could not open left.jpg image");
+            .expect("Could not open input image");
 
         println!("inverting/thresholding image");
         im.invert();
@@ -254,12 +288,12 @@ impl PartialOrd for OrderedXRect {
 
 fn main() {
     // Create output directories
-    for d in &[&*WORK_DIR, &*SEGMENTS_DIR] {
+    for d in &[&*WORK_DIR, &*SEGMENTS_DIR, &*KNOWN_GLYPHS_DIR] {
         DirBuilder::new()
             .recursive(true)
             .create(d)
             .expect("unable to create working directory");
     }
-    let labeled = GlyphClassifier::default().label_page("merged.jpg");
+    let labeled = GlyphClassifier::new().label_page("merged.jpg");
     println!("{}", labeled);
 }
