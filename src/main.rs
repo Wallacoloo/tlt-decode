@@ -133,9 +133,6 @@ impl GlyphClassifier {
                     .to_luma();
                 (image, glyph_name)
             });
-        // TODO: for now, discard empty glyphs.
-        // In the future, we can require they be an exact match.
-        let images = images.filter(|(_, name)| !name.is_empty());
         Self {
             known_glyphs: images.collect()
         }
@@ -162,18 +159,22 @@ impl GlyphClassifier {
     /// Match the glyph against all the previously labeled images and return
     /// the most likely match, in the form of (confidence between 0.0-1.0, decoded text).
     fn label_glyph(&self, im: &GrayImage) -> (f32, &str) {
-        self.known_glyphs.iter().flat_map(|(ref_im, ref_str)| {
-            // Consider each possible shift of `im` such that at least one pixel
-            // overlaps `ref_im`.
-            RectRange::from_ranges(
-                1i32 - im.width() as i32 .. ref_im.width() as i32,
-                1i32 - im.height() as i32 .. ref_im.height() as i32
-            ).unwrap().iter().map(|(x_shift, y_shift)| {
-                (NotNan::new(correlate_im(ref_im, im, x_shift, y_shift)).unwrap(), ref_str.deref())
-            }).max()
-        }).max()
-        .map(|(correlation, decoded)| (correlation.into_inner(), decoded))
-        .unwrap_or((0f32, ""))
+        self.known_glyphs.iter()
+            // TODO: for now, disregard empty glyphs; they cause error.
+            .filter(|(_, name)| !name.is_empty())
+            .flat_map(|(ref_im, ref_str)| {
+                // Consider each possible shift of `im` such that at least one pixel
+                // overlaps `ref_im`.
+                RectRange::from_ranges(
+                    1i32 - im.width() as i32 .. ref_im.width() as i32,
+                    1i32 - im.height() as i32 .. ref_im.height() as i32
+                ).unwrap().iter().map(|(x_shift, y_shift)| {
+                    (NotNan::new(correlate_im(ref_im, im, x_shift, y_shift)).unwrap(), ref_str.deref())
+                }).max()
+            })
+            .max()
+            .map(|(correlation, decoded)| (correlation.into_inner(), decoded))
+            .unwrap_or((0f32, ""))
     }
     fn label_page<P: AsRef<Path>>(&mut self, file: P) -> String {
         println!("loading {:?}", file.as_ref());
