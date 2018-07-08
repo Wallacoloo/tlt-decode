@@ -28,7 +28,8 @@ use ordered_float::NotNan;
 use rect_iter::RectRange;
 
 use std::{
-    collections::BTreeMap,
+    cmp::Ordering,
+    collections::{BTreeMap, BTreeSet},
     fs::DirBuilder,
     io::stdin,
     ops::Deref,
@@ -49,6 +50,19 @@ const MIN_CONFIDENCE: f32 = 0.998;
 struct GlyphClassifier {
     /// Pairs of images with the corresponding string of text they represent.
     known_glyphs: Vec<(GrayImage, String)>
+}
+
+/// TypedRect that's ordered primarily by the left edge.
+#[derive(Eq, PartialEq)]
+struct OrderedXRect(TypedRect<u32>);
+
+struct Row {
+    /// Glyph regions, ordered by the x coordinate of their left edge.
+    regions: BTreeSet<OrderedXRect>,
+    // Coordinates which inclusively bound all the regions.
+    // These _could_ be calculated on-the-fly, but that actually makes things messier.
+    top: u32,
+    bot: u32,
 }
 
 /// Display the image to the console via ansi control codes/text.
@@ -155,25 +169,88 @@ impl GlyphClassifier {
             *region = region.union(&union_with);
         }
 
-        let decoded_img: String = regions.iter().map(|(idx, r)| {
-            let cropped = im.crop(r.origin.x, r.origin.y, r.size.width, r.size.height);
-            cropped.save(SEGMENTS_DIR.join(format!("{:05}.png", idx)))
-                .expect("failed to save debug `cropped`");
-            let as_luma = cropped.to_luma();
-            let (rank, decoded) = self.label_glyph(&as_luma);
-            println!("decoding glyph gives '{}' with {} confidence.", decoded, rank);
-            if rank >= MIN_CONFIDENCE {
-                decoded.to_owned()
-            } else {
-                println!("confidence doesn't meet threshold.");
-                self.have_user_label_image(as_luma)
+        // Assign each bounding box to a row:
+        let mut rows: Vec<Row> = Default::default();
+        for (_region_id, rect) in regions {
+            match rows.iter_mut().filter(|row|
+                row.intersects(&rect)
+            ).next()
+            {
+                Some(row) => row.insert(rect),
+                None => rows.push(Row::from_region(rect)),
             }
-        }).collect();
+        }
+
+        for r in &rows {
+            println!("row from {} to {} contains {} items", r.top, r.bot, r.regions.len());
+        }
+        println!("total items to parse: {}",
+            rows.iter().map(|r| r.regions.len()).sum::<usize>()
+        );
+
+        let mut parsed_rows = Vec::new();
+        for (row_idx, row) in rows.into_iter().enumerate() {
+            let decoded_line: String = row.regions.into_iter().enumerate().map(|(col_idx, region)| {
+                let r = region.0;
+                let cropped = im.crop(r.origin.x, r.origin.y, r.size.width, r.size.height);
+                let as_luma = cropped.to_luma();
+                let (rank, decoded) = self.label_glyph(&as_luma);
+                println!("decoding glyph gives '{}' with {} confidence.", decoded, rank);
+                let decoded = if rank >= MIN_CONFIDENCE {
+                    decoded.to_owned()
+                } else {
+                    println!("confidence doesn't meet threshold.");
+                    self.have_user_label_image(as_luma)
+                };
+                cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded)))
+                    .expect("failed to save debug `cropped`");
+                decoded
+            }).collect();
+            println!("{}", decoded_line);
+            parsed_rows.push(decoded_line);
+        }
 
         println!("done");
-        decoded_img
+        parsed_rows.into_iter().collect()
     }
 }
+
+impl Row {
+    fn from_region(region: TypedRect<u32>) -> Self {
+        let mut s = BTreeSet::new();
+        s.insert(OrderedXRect(region.clone()));
+        Self {
+            regions: s,
+            top: region.min_y(),
+            bot: region.max_y()
+        }
+    }
+    /// Returns true if the region intersects with the bounding box of this row.
+    fn intersects(&self, region: &TypedRect<u32>) -> bool {
+        // Check if region is entirely above or entirely below the row;
+        // invert that to determine if there's intersection.
+        !(region.max_y() < self.top || region.min_y() > self.bot)
+    }
+    fn insert(&mut self, region: TypedRect<u32>) {
+        self.top = self.top.min(region.min_y());
+        self.bot = self.bot.max(region.max_y());
+        self.regions.insert(OrderedXRect(region));
+    }
+}
+
+impl Ord for OrderedXRect {
+    fn cmp(&self, other: &OrderedXRect) -> Ordering {
+        let me =   (self.0.min_x(),  self.0.max_x(),  self.0.min_y(),  self.0.max_y());
+        let them = (other.0.min_x(), other.0.max_x(), other.0.min_y(), other.0.max_y());
+        me.cmp(&them)
+    }
+}
+impl PartialOrd for OrderedXRect {
+    fn partial_cmp(&self, other: &OrderedXRect) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 
 fn main() {
     // Create output directories
