@@ -114,7 +114,7 @@ fn correlate_im(ref_im: &GrayImage, im: &GrayImage, x_shift: i32, y_shift: i32) 
 
 /// Given an image (one which has already been thresholded), find all disjoint sets
 /// of connected pixels and return bounding boxes around each set of connected pixels.
-fn extract_regions(thresholded: &GrayImage) -> BTreeMap<u32, TypedRect<u32>> {
+fn extract_regions(thresholded: &GrayImage) -> Vec<TypedRect<u32>> {
     let im_components = connected_components(
         thresholded,
         Connectivity::Four,
@@ -128,12 +128,15 @@ fn extract_regions(thresholded: &GrayImage) -> BTreeMap<u32, TypedRect<u32>> {
         let region = regions.entry(pixel.data[0]).or_insert(union_with);
         *region = region.union(&union_with);
     }
-    regions
+    regions.values().cloned().collect()
 }
-fn arrange_regions_into_rows(regions: BTreeMap<u32, TypedRect<u32>>) -> Vec<Row> {
+
+/// Group regions into discrete rows.
+/// Within each row, the glyphs are ordered by their left edge.
+fn arrange_regions_into_rows(regions: Vec<TypedRect<u32>>) -> Vec<Row> {
     // Assign each bounding box to a row:
     let mut rows: Vec<Row> = Default::default();
-    for (_region_id, rect) in regions {
+    for rect in regions {
         match rows.iter_mut().filter(|row|
             row.intersects(&rect)
         ).next()
