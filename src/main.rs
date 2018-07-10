@@ -112,6 +112,39 @@ fn correlate_im(ref_im: &GrayImage, im: &GrayImage, x_shift: i32, y_shift: i32) 
     1.0f32 - cum_err as f32 / max_err as f32
 }
 
+/// Given an image (one which has already been thresholded), find all disjoint sets
+/// of connected pixels and return bounding boxes around each set of connected pixels.
+fn extract_regions(thresholded: &GrayImage) -> BTreeMap<u32, TypedRect<u32>> {
+    let im_components = connected_components(
+        thresholded,
+        Connectivity::Four,
+        Luma([0u8]));
+
+    let mut regions: BTreeMap<u32, TypedRect<u32>> = Default::default();
+    for (x, y, pixel) in im_components.enumerate_pixels()
+        .filter(|(_, _, px)| px.data[0] != 0)
+    {
+        let union_with = rect(x, y, 1, 1);
+        let region = regions.entry(pixel.data[0]).or_insert(union_with);
+        *region = region.union(&union_with);
+    }
+    regions
+}
+fn arrange_regions_into_rows(regions: BTreeMap<u32, TypedRect<u32>>) -> Vec<Row> {
+    // Assign each bounding box to a row:
+    let mut rows: Vec<Row> = Default::default();
+    for (_region_id, rect) in regions {
+        match rows.iter_mut().filter(|row|
+            row.intersects(&rect)
+        ).next()
+        {
+            Some(row) => row.insert(rect),
+            None => rows.push(Row::from_region(rect)),
+        }
+    }
+    rows
+}
+
 impl GlyphClassifier {
     fn new() -> Self {
         let images = read_dir(&*KNOWN_GLYPHS_DIR)
@@ -188,33 +221,9 @@ impl GlyphClassifier {
         im.save(WORK_DIR.join("thresholded.png"))
             .expect("failed to save debug `im`");
 
-        println!("segmenting image");
-        let im_components = connected_components(
-            &thresholded,
-            Connectivity::Four,
-            Luma([0u8]));
+        let regions = extract_regions(&thresholded);
 
-        // Assign each glyph a bounding box:
-        let mut regions: BTreeMap<u32, TypedRect<u32>> = Default::default();
-        for (x, y, pixel) in im_components.enumerate_pixels()
-            .filter(|(_, _, px)| px.data[0] != 0)
-        {
-            let union_with = rect(x, y, 1, 1);
-            let region = regions.entry(pixel.data[0]).or_insert(union_with);
-            *region = region.union(&union_with);
-        }
-
-        // Assign each bounding box to a row:
-        let mut rows: Vec<Row> = Default::default();
-        for (_region_id, rect) in regions {
-            match rows.iter_mut().filter(|row|
-                row.intersects(&rect)
-            ).next()
-            {
-                Some(row) => row.insert(rect),
-                None => rows.push(Row::from_region(rect)),
-            }
-        }
+        let rows = arrange_regions_into_rows(regions);
 
         for r in &rows {
             println!("row from {} to {} contains {} items", r.top, r.bot, r.regions.len());
