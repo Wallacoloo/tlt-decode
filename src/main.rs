@@ -31,8 +31,7 @@ use rect_iter::RectRange;
 use sha2::{Sha256, Digest};
 
 use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     fs::{DirBuilder, read_dir},
     io::stdin,
     ops::Deref,
@@ -50,22 +49,34 @@ const UNICODE_FULL_BLOCK: &str = "█";
 /// Minimum confidence needed to classify a glyph.
 const MIN_CONFIDENCE: f32 = 0.998;
 
+/// Takes an image and OCRs the text inside it.
+/// Assumes the font is roughly a bitmap font and letters are arranged clearly into rows.
 struct GlyphClassifier {
     /// Pairs of images with the corresponding string of text they represent.
     known_glyphs: Vec<(GrayImage, String)>
 }
 
-/// TypedRect that's ordered primarily by the left edge.
-#[derive(Eq, PartialEq)]
-struct OrderedXRect(TypedRect<u32>);
-
+/// Contains each glyph region within one line of text.
 struct Row {
     /// Glyph regions, ordered by the x coordinate of their left edge.
-    regions: BTreeSet<OrderedXRect>,
+    regions: Vec<TypedRect<u32>>,
     // Coordinates which inclusively bound all the regions.
     // These _could_ be calculated on-the-fly, but that actually makes things messier.
     top: u32,
     bot: u32,
+}
+
+/// Return whether two regions overlap if they were extended infinitely on the vertical axis.
+fn is_x_overlap(r0: &TypedRect<u32>, r1: &TypedRect<u32>) -> bool {
+    // if r0 is wholly to the left or wholly to the right of r1, then no intersection,
+    // else intersection.
+    !(r0.max_x() < r1.min_x() || r0.min_x() > r1.max_x())
+}
+/// Return whether two regions overlap if they were extended infinitely on the horizontal axis.
+fn is_y_overlap(r0: &TypedRect<u32>, r1: &TypedRect<u32>) -> bool {
+    // if r0 is wholly above or wholly below r1, then no intersection,
+    // else intersection
+    !(r0.max_y() < r1.min_y() || r0.min_y() > r1.max_y())
 }
 
 /// Display the image to the console via ansi control codes/text.
@@ -134,16 +145,45 @@ fn extract_regions(thresholded: &GrayImage) -> Vec<TypedRect<u32>> {
 /// Group regions into discrete rows.
 /// Within each row, the glyphs are ordered by their left edge.
 fn arrange_regions_into_rows(regions: Vec<TypedRect<u32>>) -> Vec<Row> {
-    // Assign each bounding box to a row:
+    // Assign each region to a row:
     let mut rows: Vec<Row> = Default::default();
     for rect in regions {
         match rows.iter_mut().filter(|row|
             row.intersects(&rect)
         ).next()
         {
-            Some(row) => row.insert(rect),
+            Some(row) => row.push(rect),
             None => rows.push(Row::from_region(rect)),
         }
+    }
+    // sort the regions within each row.
+    rows.iter_mut().for_each(Row::sort);
+    // merge certain regions, where we expect they are actually one glyph (e.g. i or j).
+    for row in rows.iter_mut() {
+        let mut current_region: Option<TypedRect<u32>> = None;
+        let mut new_row: Vec<TypedRect<u32>> = row.regions.drain(..).flat_map(|region| {
+                if let Some(r0) = current_region.take() {
+                    if is_x_overlap(&r0, &region) && !is_y_overlap(&r0, &region) {
+                        // the two regions sit on top of eachother; likely the two halves
+                        // of something like an 'i' or 'j'.
+                        current_region = Some(r0.union(&region));
+                        None
+                    } else {
+                        // regions are distinct; yield the previous one.
+                        current_region = Some(region);
+                        Some(r0)
+                    }
+                } else {
+                    // first region in sequence; save it away for processing.
+                    current_region = Some(region);
+                    None
+                }
+            })
+            .collect();
+        if let Some(r) = current_region {
+            new_row.push(r);
+        }
+        row.regions = new_row;
     }
     rows
 }
@@ -183,6 +223,8 @@ impl GlyphClassifier {
         im.save(name).expect("failed to save glyph association");
         self.known_glyphs.push((im, s));
     }
+    /// Show an image to the console, ask the user what symbol it corresponds to,
+    /// and then associate that glyph with that symbol permanently.
     fn have_user_label_image(&mut self, im: GrayImage) -> String {
         show_im(&im);
         println!("What does the above image say? (hit 'enter' if it should be ignored)");
@@ -212,6 +254,7 @@ impl GlyphClassifier {
             .map(|(correlation, decoded)| (correlation.into_inner(), decoded))
             .unwrap_or((0f32, ""))
     }
+    /// Take an image of multiple lines of text and OCR the whole thing.
     fn label_page<P: AsRef<Path>>(&mut self, file: P) -> String {
         println!("loading {:?}", file.as_ref());
         let mut im = image::open(file)
@@ -238,7 +281,7 @@ impl GlyphClassifier {
         let mut parsed_rows = Vec::new();
         for (row_idx, row) in rows.into_iter().enumerate() {
             let decoded_line: String = row.regions.into_iter().enumerate().map(|(col_idx, region)| {
-                let r = region.0;
+                let r = region;
                 let cropped = im.crop(r.origin.x, r.origin.y, r.size.width, r.size.height);
                 let as_luma = cropped.to_luma();
                 let (rank, decoded) = self.label_glyph(&as_luma);
@@ -263,11 +306,10 @@ impl GlyphClassifier {
 }
 
 impl Row {
+    /// Create a row which contains exactly one glyph region.
     fn from_region(region: TypedRect<u32>) -> Self {
-        let mut s = BTreeSet::new();
-        s.insert(OrderedXRect(region.clone()));
         Self {
-            regions: s,
+            regions: vec![region],
             top: region.min_y(),
             bot: region.max_y()
         }
@@ -278,23 +320,16 @@ impl Row {
         // invert that to determine if there's intersection.
         !(region.max_y() < self.top || region.min_y() > self.bot)
     }
-    fn insert(&mut self, region: TypedRect<u32>) {
+    /// Add a new region to the row.
+    fn push(&mut self, region: TypedRect<u32>) {
         self.top = self.top.min(region.min_y());
         self.bot = self.bot.max(region.max_y());
-        self.regions.insert(OrderedXRect(region));
+        self.regions.push(region);
     }
-}
-
-impl Ord for OrderedXRect {
-    fn cmp(&self, other: &OrderedXRect) -> Ordering {
-        let me =   (self.0.min_x(),  self.0.max_x(),  self.0.min_y(),  self.0.max_y());
-        let them = (other.0.min_x(), other.0.max_x(), other.0.min_y(), other.0.max_y());
-        me.cmp(&them)
-    }
-}
-impl PartialOrd for OrderedXRect {
-    fn partial_cmp(&self, other: &OrderedXRect) -> Option<Ordering> {
-        Some(self.cmp(other))
+    fn sort(&mut self) {
+        self.regions.sort_by_key(|r| {
+            (r.min_x(), r.max_x(), r.min_y(), r.max_y())
+        });
     }
 }
 
