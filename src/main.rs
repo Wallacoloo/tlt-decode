@@ -203,7 +203,7 @@ impl GlyphClassifier {
                     .split('.')
                     .next()
                     .unwrap()
-                    .to_owned();
+                    .replace("_", "/");
                 let image = image::open(dir_entry.path())
                     .expect("Unable to open glyph")
                     .to_luma();
@@ -218,7 +218,8 @@ impl GlyphClassifier {
         let mut hasher = Sha256::default();
         hasher.input(&im);
         let hash = base64::encode_config(&hasher.result(), base64::URL_SAFE);
-        let name = KNOWN_GLYPHS_DIR.join(format!("{}.{}.png", s, hash));
+        // Saving a file with name of 'slash' causes issues; represent that character with '_'.
+        let name = KNOWN_GLYPHS_DIR.join(format!("{}.{}.png", s.replace("/", "_"), hash));
         println!("Saving new image association to {:?}", name);
         im.save(name).expect("failed to save glyph association");
         self.known_glyphs.push((im, s));
@@ -292,7 +293,7 @@ impl GlyphClassifier {
                     println!("confidence doesn't meet threshold.");
                     self.have_user_label_image(as_luma)
                 };
-                cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded)))
+                cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded.replace("/", "_"))))
                     .expect("failed to save debug `cropped`");
                 decoded
             }).collect();
