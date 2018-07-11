@@ -252,10 +252,16 @@ impl GlyphClassifier {
     /// the most likely match, in the form of (confidence between 0.0-1.0, decoded text).
     fn label_glyph(&self, im: &GrayImage) -> (f32, &str) {
         self.known_glyphs.iter()
-            // TODO: for now, disregard empty glyphs; they cause error.
-            .filter(|(_, name)| !name.is_empty())
-            .map(|(ref_im, ref_str)| {
-                (NotNan::new(correlate_im(ref_im, im)).unwrap(), ref_str.deref())
+            .filter_map(|(ref_im, ref_str)| {
+                let cor = correlate_im(ref_im, im);
+                if !ref_str.is_empty() || cor == 1.0f32 {
+                    // Only decode to empty glyph if 100% match.
+                    // TODO: why do so many things decode to empty glyphs
+                    // if this is omitted?
+                    Some((NotNan::new(cor).unwrap(), ref_str.deref()))
+                } else {
+                    None
+                }
             })
             .max()
             .map(|(correlation, decoded)| (correlation.into_inner(), decoded))
@@ -310,7 +316,7 @@ impl GlyphClassifier {
                     .expect("failed to write OCR'd text to output file");
                 decoded
             }).collect();
-            println!("{}", decoded_line);
+            println!("OCR'd a line: {}", decoded_line);
             parsed_rows.push(decoded_line);
         }
 
