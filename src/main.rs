@@ -90,37 +90,50 @@ fn show_im(im: &GrayImage) {
     }
 }
 
-/// Return a value between 0.0 - 1.0 indicating how similar the two images are,
-/// when im is shifted by (x_shift, y_shift), and pixels where an image isn't defined
-/// are defaulted to the background color (0).
-fn correlate_im(ref_im: &GrayImage, im: &GrayImage, x_shift: i32, y_shift: i32) -> f32 {
+/// Return a value between 0.0 - 1.0 indicating how similar the two images can
+/// be made when considering all possible (x_shift, y_shift) shifts, and pixels
+/// where an image isn't defined are defaulted to the background color (0).
+fn correlate_im(ref_im: &GrayImage, im: &GrayImage) -> f32 {
     let left = 1i32 - im.width() as i32;
     let top = 1i32 - im.height() as i32;
     let right = (ref_im.width() + im.width()) as i32;
     let bot = (ref_im.height() + im.height()) as i32;
-    let cum_err: i64 = RectRange::from_ranges(
+    let all_coordinates = RectRange::from_ranges(
         left..right,
         top..bot
-    ).unwrap().iter().map(|(ref_x, ref_y)| {
-        // Get the pixel at the relevant coordinates, or (0) if OOB.
-        let ref_px = if ref_x >= 0 && ref_x < ref_im.width() as i32
-            && ref_y >= 0 && ref_y < ref_im.height() as i32
-        {
-            ref_im.get_pixel(ref_x as u32, ref_y as u32).data[0]
-        } else { 0 } as i32;
+    ).unwrap();
+    let valid_shifts = RectRange::from_ranges(
+        left .. ref_im.width() as i32,
+        top .. ref_im.height() as i32
+    ).unwrap();
 
-        let im_x = ref_x + x_shift;
-        let im_y = ref_y + y_shift;
-        let im_px = if im_x >= 0 && im_x < im.width() as i32
-            && im_y >= 0 && im_y < im.height() as i32
-        {
-            im.get_pixel(im_x as u32, im_y as u32).data[0]
-        } else { 0 } as i32;
-        // return square error.
-        ((ref_px - im_px) * (ref_px - im_px)) as i64
-    }).sum();
-    let max_err = 255*255 * ((right-left) * (bot-top)) as i64;
-    1.0f32 - cum_err as f32 / max_err as f32
+    let correlated_once = |x_shift: i32, y_shift: i32| -> f32 {
+        let cum_err: i64 = all_coordinates.iter().map(|(ref_x, ref_y)| {
+            // Get the pixel at the relevant coordinates, or (0) if OOB.
+            let ref_px = if ref_x >= 0 && ref_x < ref_im.width() as i32
+                && ref_y >= 0 && ref_y < ref_im.height() as i32
+            {
+                ref_im.get_pixel(ref_x as u32, ref_y as u32).data[0]
+            } else { 0 } as i32;
+
+            let im_x = ref_x + x_shift;
+            let im_y = ref_y + y_shift;
+            let im_px = if im_x >= 0 && im_x < im.width() as i32
+                && im_y >= 0 && im_y < im.height() as i32
+            {
+                im.get_pixel(im_x as u32, im_y as u32).data[0]
+            } else { 0 } as i32;
+            // return square error.
+            ((ref_px - im_px) * (ref_px - im_px)) as i64
+        }).sum();
+        let max_err = 255*255 * ((right-left) * (bot-top)) as i64;
+        1.0f32 - cum_err as f32 / max_err as f32
+    };
+    valid_shifts.into_iter().map(|(x_shift, y_shift)| {
+            NotNan::new(correlated_once(x_shift, y_shift)).unwrap()
+        }).max()
+        .map(NotNan::into_inner)
+        .unwrap_or(0f32)
 }
 
 /// Given an image (one which has already been thresholded), find all disjoint sets
@@ -241,15 +254,8 @@ impl GlyphClassifier {
         self.known_glyphs.iter()
             // TODO: for now, disregard empty glyphs; they cause error.
             .filter(|(_, name)| !name.is_empty())
-            .flat_map(|(ref_im, ref_str)| {
-                // Consider each possible shift of `im` such that at least one pixel
-                // overlaps `ref_im`.
-                RectRange::from_ranges(
-                    1i32 - im.width() as i32 .. ref_im.width() as i32,
-                    1i32 - im.height() as i32 .. ref_im.height() as i32
-                ).unwrap().iter().map(|(x_shift, y_shift)| {
-                    (NotNan::new(correlate_im(ref_im, im, x_shift, y_shift)).unwrap(), ref_str.deref())
-                }).max()
+            .map(|(ref_im, ref_str)| {
+                (NotNan::new(correlate_im(ref_im, im)).unwrap(), ref_str.deref())
             })
             .max()
             .map(|(correlation, decoded)| (correlation.into_inner(), decoded))
