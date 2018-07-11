@@ -90,10 +90,22 @@ fn show_im(im: &GrayImage) {
     }
 }
 
-/// Return a value between 0.0 - 1.0 indicating how similar the two images can
-/// be made when considering all possible (x_shift, y_shift) shifts, and pixels
-/// where an image isn't defined are defaulted to the background color (0).
-fn correlate_im(ref_im: &GrayImage, im: &GrayImage) -> f32 {
+/// Return the maximum cross-correlation between `im` and `ref_im`, where
+/// 1.0 indicates identical images, and 0.0 indicates no similarity.
+///
+/// i.e. consider all pairs of (`im_shift`, `ref_im`), where `im_shift` is
+/// `im` but shifted by some vector such that the two images still overlap.
+/// For each pair:
+///   1. Perform element-wise subtraction of the two images (pixels which don't
+///      exist in one images are defaulted to background color (0).
+///   2. Measure the energy in the resulting image.
+/// If the energy (sum of squares of each pixel value) is low, that indicates
+/// the images are similar.
+///
+/// Therefore, return the minimum energy found, subtracted from the maximum energy
+/// by which two images _could_ differ, and normalized such that 1.0 indicates
+/// 100% matching images.
+fn cross_correlate_im(ref_im: &GrayImage, im: &GrayImage) -> f32 {
     let left = 1i32 - im.width() as i32;
     let top = 1i32 - im.height() as i32;
     let right = (ref_im.width() + im.width()) as i32;
@@ -253,7 +265,7 @@ impl GlyphClassifier {
     fn label_glyph(&self, im: &GrayImage) -> (f32, &str) {
         self.known_glyphs.iter()
             .filter_map(|(ref_im, ref_str)| {
-                let cor = correlate_im(ref_im, im);
+                let cor = cross_correlate_im(ref_im, im);
                 if !ref_str.is_empty() || cor == 1.0f32 {
                     // Only decode to empty glyph if 100% match.
                     // TODO: why do so many things decode to empty glyphs
