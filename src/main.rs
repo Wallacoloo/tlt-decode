@@ -328,8 +328,12 @@ impl GlyphClassifier {
                     .expect("failed to write OCR'd text to output file");
                 decoded
             }).collect();
-            println!("OCR'd a line: {}", decoded_line);
-            parsed_rows.push(decoded_line);
+            if !decoded_line.is_empty() {
+                println!("OCR'd a line: {}", decoded_line);
+                b64_file.write("\n".as_bytes())
+                    .expect("failed to write newline to output file");
+                parsed_rows.push(decoded_line);
+            }
         }
 
         println!("done");
