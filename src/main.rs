@@ -32,8 +32,8 @@ use sha2::{Sha256, Digest};
 
 use std::{
     collections::BTreeMap,
-    fs::{DirBuilder, read_dir},
-    io::stdin,
+    fs::{DirBuilder, File, read_dir},
+    io::{stdin, Write},
     ops::Deref,
     path::{Path, PathBuf}
 };
@@ -279,6 +279,11 @@ impl GlyphClassifier {
             rows.iter().map(|r| r.regions.len()).sum::<usize>()
         );
 
+        let mut b64_file = File::create(WORK_DIR.join("b64.txt"))
+            .expect("failed to create output base64 text file");
+
+        // Perform the actual letter-by-letter OCR.
+
         let mut parsed_rows = Vec::new();
         for (row_idx, row) in rows.into_iter().enumerate() {
             let decoded_line: String = row.regions.into_iter().enumerate().map(|(col_idx, region)| {
@@ -295,6 +300,8 @@ impl GlyphClassifier {
                 };
                 cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded.replace("/", "_"))))
                     .expect("failed to save debug `cropped`");
+                b64_file.write(decoded.as_bytes())
+                    .expect("failed to write OCR'd text to output file");
                 decoded
             }).collect();
             println!("{}", decoded_line);
