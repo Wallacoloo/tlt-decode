@@ -49,7 +49,7 @@ lazy_static! {
 /// Unicode 'full block' character, i.e. a solid [black] rectangle.
 const UNICODE_FULL_BLOCK: &str = "█";
 /// Minimum confidence needed to classify a glyph.
-const MIN_CONFIDENCE: f32 = 0.99;
+const MIN_CONFIDENCE: f32 = 0.986;
 /// Minimum value a pixel needs to be considered foreground.
 const FG_THRESHOLD: u8 = 85;
 
@@ -331,7 +331,7 @@ impl GlyphClassifier {
                 let decoded = if rank >= MIN_CONFIDENCE {
                     decoded.to_owned()
                 } else {
-                    println!("confidence doesn't meet threshold.");
+                    println!("confidence doesn't meet threshold for glyph at row {}, col {}", row_idx, col_idx);
                     self.have_user_label_image(as_luma)
                 };
                 cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded.replace("/", "_"))))
