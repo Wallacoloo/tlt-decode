@@ -117,8 +117,6 @@ fn show_im(im: &GrayImage) {
 fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
     let left = 1i32 - pat.width() as i32;
     let top = 1i32 - pat.height() as i32;
-    let right = (im.width() + pat.width()) as i32;
-    let bot = (im.height() + pat.height()) as i32;
     let valid_shifts = RectRange::from_ranges(
         left .. im.width() as i32,
         top .. im.height() as i32
@@ -129,7 +127,7 @@ fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
         .map(|(_x, _y, v)|
             v.data[0] as u64 * v.data[0] as u64
         ).sum::<u64>();
-    let max_err = 255*255 * ((right-left) * (bot-top)) as i64;
+    let max_err = 255*255 * (im.width()*im.height() + pat.width()*pat.height()) as u64;
 
     let correlated_once = |(x_shift, y_shift) : (i32, i32)| -> f32 {
         let im_range = RectRange::zero_start(im.width() as i32, im.height() as i32).unwrap();
@@ -151,7 +149,7 @@ fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
                 im_px as u64 * pat_px as u64
             }).sum::<u64>();
         let cum_err = sum_of_all_squares - 2*inner_product;
-        1.0f32 - cum_err as f32 / max_err as f32
+        (max_err - cum_err) as f32 / max_err as f32
     };
     valid_shifts.into_iter()
         .map(correlated_once)
