@@ -20,16 +20,15 @@ use euclid::{
     TypedRect
 };
 use image::{
-    GenericImage,
     GrayImage,
     Luma
 };
 use imageproc::{
     contrast::threshold_mut,
     region_labelling::{connected_components, Connectivity},
-    template_matching::{match_template, MatchTemplateMethod}
 };
 use ordered_float::NotNan;
+use rect_iter::RectRange;
 use rayon::prelude::*;
 use sha2::{Sha256, Digest};
 
@@ -93,11 +92,11 @@ fn show_im(im: &GrayImage) {
     }
 }
 
-/// Return the maximum cross-correlation between `im` and `ref_im`, where
+/// Return the maximum cross-correlation between `im` and `pat`, where
 /// 1.0 indicates identical images, and 0.0 indicates no similarity.
 ///
-/// i.e. consider all pairs of (`im_shift`, `ref_im`), where `im_shift` is
-/// `im` but shifted by some vector such that the two images still overlap.
+/// i.e. consider all pairs of (`im`, `pat_shift`), where `pat_shift` is
+/// `pat` but shifted by some vector such that the two images still overlap.
 /// For each pair:
 ///   1. Perform element-wise subtraction of the two images (pixels which don't
 ///      exist in one images are defaulted to background color (0).
@@ -108,46 +107,51 @@ fn show_im(im: &GrayImage) {
 /// Therefore, return the minimum energy found, subtracted from the maximum energy
 /// by which two images _could_ differ, and normalized such that 1.0 indicates
 /// 100% matching images.
-fn cross_correlate_im(ref_im: &GrayImage, im: &GrayImage) -> f32 {
-    // Prepare correlation so that we never have to look at pixels that would be OOB.
-    // imageproc will place the template only in places where it fits entirely inside
-    // the other image.
-    // Step 1: create an expanded_ref im which is `ref_im` surrounded by so much
-    // empty space. Placing the origin of `ref_im` anywhere inside `im` should
-    // be such that `expanded_ref` covers every pixel of `im`.
-    let ref_pad_x = im.width()-1;
-    let ref_pad_y = im.height()-1;
-    let mut expanded_ref = GrayImage::new(
-        ref_im.width() + 2*ref_pad_x,
-        ref_im.height() + 2*ref_pad_y);
-    expanded_ref.copy_from(ref_im, ref_pad_x, ref_pad_y);
-    // Step 2: Expand `im` into `expanded_im`.
-    // Add ref_im.width()-1 + ref_pad_x to the left edge:
-    // this allows for the left-most overlap to contain just the right-most column of the
-    // original ref_im.
-    // Add same amount to right edge, such that the right-most overlap contains
-    // just the left-most column of ref_im.
-    let im_pad_x = ref_im.width()-1 + ref_pad_x;
-    let im_pad_y = ref_im.height()-1 + ref_pad_y;
-    let mut expanded_im = GrayImage::new(
-        im.width() + 2*im_pad_x,
-        im.height() + 2*im_pad_y);
-    expanded_im.copy_from(im, im_pad_x, im_pad_y);
-    // Correlate the template against the image at each possible pixel shift.
-    let corr = match_template(
-        &expanded_im,
-        &expanded_ref,
-        MatchTemplateMethod::SumOfSquaredErrors);
-    // Take the shift that produced the best correlation and turn that into a confidence.
-    let cum_err = corr.enumerate_pixels()
-        .map(|(_x, _y, p)| p.data[0])
+fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
+    let left = 1i32 - pat.width() as i32;
+    let top = 1i32 - pat.height() as i32;
+    let right = (im.width() + pat.width()) as i32;
+    let bot = (im.height() + pat.height()) as i32;
+    let valid_shifts = RectRange::from_ranges(
+        left .. im.width() as i32,
+        top .. im.height() as i32
+    ).unwrap();
+
+    let sum_of_all_squares: u64 = im.enumerate_pixels()
+        .chain(pat.enumerate_pixels())
+        .map(|(_x, _y, v)|
+            v.data[0] as u64 * v.data[0] as u64
+        ).sum::<u64>();
+    let max_err = 255*255 * ((right-left) * (bot-top)) as i64;
+
+    let correlated_once = |(x_shift, y_shift) : (i32, i32)| -> f32 {
+        let im_range = RectRange::zero_start(im.width() as i32, im.height() as i32).unwrap();
+        let pat_range = RectRange::zero_start(pat.width() as i32, pat.height() as i32).unwrap();
+        let overlapping = im_range.intersection(
+            &pat_range.slide((x_shift, y_shift))
+        );
+        let inner_product = overlapping.expect("tried to shift a pattern in an invalid way")
+            .iter()
+            .map(|(x, y)| {
+                let im_px = im.get_pixel(x as u32, y as u32).data[0];
+                let pat_px = pat.get_pixel((x - x_shift) as u32, (y - y_shift) as u32).data[0];
+                // Subtract this pixel's contribution to sum_of_all_squares:
+                // - im_px^2 - pat_px^2
+                // Add the square error:
+                // + (im_px - pat_px)^2
+                // This comes out to -2*im_px*pat_px
+                // Factor out the -2
+                im_px as u64 * pat_px as u64
+            }).sum::<u64>();
+        let cum_err = sum_of_all_squares - 2*inner_product;
+        1.0f32 - cum_err as f32 / max_err as f32
+    };
+    valid_shifts.into_iter()
+        .map(correlated_once)
         .flat_map(NotNan::new)
-        .min()
+        .max()
         .map(NotNan::into_inner)
-        .unwrap_or(std::f32::INFINITY);
-    // Maximum possible error: all pixels are completely different.
-    let max_err = 255*255 * (im.width()*im.height() + ref_im.width()*ref_im.height()) as u64;
-    1.0f32 - cum_err / max_err as f32
+        .unwrap_or(0f32)
 }
 
 /// Given an image (one which has already been thresholded), find all disjoint sets
