@@ -19,15 +19,16 @@ use euclid::{
     TypedRect
 };
 use image::{
+    GenericImage,
     GrayImage,
     Luma
 };
 use imageproc::{
     contrast::threshold_mut,
-    region_labelling::{connected_components, Connectivity}
+    region_labelling::{connected_components, Connectivity},
+    template_matching::{match_template, MatchTemplateMethod}
 };
 use ordered_float::NotNan;
-use rect_iter::RectRange;
 use sha2::{Sha256, Digest};
 
 use std::{
@@ -47,7 +48,7 @@ lazy_static! {
 /// Unicode 'full block' character, i.e. a solid [black] rectangle.
 const UNICODE_FULL_BLOCK: &str = "█";
 /// Minimum confidence needed to classify a glyph.
-const MIN_CONFIDENCE: f32 = 0.998;
+const MIN_CONFIDENCE: f32 = 0.99;
 
 /// Takes an image and OCRs the text inside it.
 /// Assumes the font is roughly a bitmap font and letters are arranged clearly into rows.
@@ -106,46 +107,45 @@ fn show_im(im: &GrayImage) {
 /// by which two images _could_ differ, and normalized such that 1.0 indicates
 /// 100% matching images.
 fn cross_correlate_im(ref_im: &GrayImage, im: &GrayImage) -> f32 {
-    let left = 1i32 - im.width() as i32;
-    let top = 1i32 - im.height() as i32;
-    let right = (ref_im.width() + im.width()) as i32;
-    let bot = (ref_im.height() + im.height()) as i32;
-    let all_coordinates = RectRange::from_ranges(
-        left..right,
-        top..bot
-    ).unwrap();
-    let valid_shifts = RectRange::from_ranges(
-        left .. ref_im.width() as i32,
-        top .. ref_im.height() as i32
-    ).unwrap();
-
-    let correlated_once = |x_shift: i32, y_shift: i32| -> f32 {
-        let cum_err: i64 = all_coordinates.iter().map(|(ref_x, ref_y)| {
-            // Get the pixel at the relevant coordinates, or (0) if OOB.
-            let ref_px = if ref_x >= 0 && ref_x < ref_im.width() as i32
-                && ref_y >= 0 && ref_y < ref_im.height() as i32
-            {
-                ref_im.get_pixel(ref_x as u32, ref_y as u32).data[0]
-            } else { 0 } as i32;
-
-            let im_x = ref_x + x_shift;
-            let im_y = ref_y + y_shift;
-            let im_px = if im_x >= 0 && im_x < im.width() as i32
-                && im_y >= 0 && im_y < im.height() as i32
-            {
-                im.get_pixel(im_x as u32, im_y as u32).data[0]
-            } else { 0 } as i32;
-            // return square error.
-            ((ref_px - im_px) * (ref_px - im_px)) as i64
-        }).sum();
-        let max_err = 255*255 * ((right-left) * (bot-top)) as i64;
-        1.0f32 - cum_err as f32 / max_err as f32
-    };
-    valid_shifts.into_iter().map(|(x_shift, y_shift)| {
-            NotNan::new(correlated_once(x_shift, y_shift)).unwrap()
-        }).max()
+    // Prepare correlation so that we never have to look at pixels that would be OOB.
+    // imageproc will place the template only in places where it fits entirely inside
+    // the other image.
+    // Step 1: create an expanded_ref im which is `ref_im` surrounded by so much
+    // empty space. Placing the origin of `ref_im` anywhere inside `im` should
+    // be such that `expanded_ref` covers every pixel of `im`.
+    let ref_pad_x = im.width()-1;
+    let ref_pad_y = im.height()-1;
+    let mut expanded_ref = GrayImage::new(
+        ref_im.width() + 2*ref_pad_x,
+        ref_im.height() + 2*ref_pad_y);
+    expanded_ref.copy_from(ref_im, ref_pad_x, ref_pad_y);
+    // Step 2: Expand `im` into `expanded_im`.
+    // Add ref_im.width()-1 + ref_pad_x to the left edge:
+    // this allows for the left-most overlap to contain just the right-most column of the
+    // original ref_im.
+    // Add same amount to right edge, such that the right-most overlap contains
+    // just the left-most column of ref_im.
+    let im_pad_x = ref_im.width()-1 + ref_pad_x;
+    let im_pad_y = ref_im.height()-1 + ref_pad_y;
+    let mut expanded_im = GrayImage::new(
+        im.width() + 2*im_pad_x,
+        im.height() + 2*im_pad_y);
+    expanded_im.copy_from(im, im_pad_x, im_pad_y);
+    // Correlate the template against the image at each possible pixel shift.
+    let corr = match_template(
+        &expanded_im,
+        &expanded_ref,
+        MatchTemplateMethod::SumOfSquaredErrors);
+    // Take the shift that produced the best correlation and turn that into a confidence.
+    let cum_err = corr.enumerate_pixels()
+        .map(|(_x, _y, p)| p.data[0])
+        .flat_map(NotNan::new)
+        .min()
         .map(NotNan::into_inner)
-        .unwrap_or(0f32)
+        .unwrap_or(std::f32::INFINITY);
+    // Maximum possible error: all pixels are completely different.
+    let max_err = 255*255 * (im.width()*im.height() + ref_im.width()*ref_im.height()) as u64;
+    1.0f32 - cum_err / max_err as f32
 }
 
 /// Given an image (one which has already been thresholded), find all disjoint sets
