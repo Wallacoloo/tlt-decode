@@ -115,11 +115,13 @@ fn show_im(im: &GrayImage) {
 /// by which two images _could_ differ, and normalized such that 1.0 indicates
 /// 100% matching images.
 fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
-    let left = 1i32 - pat.width() as i32;
-    let top = 1i32 - pat.height() as i32;
+    const MAX_SHIFT_X: u32 = 5;
+    const MAX_SHIFT_Y: u32 = 6;
+    let left = 1i32 - pat.width().min(MAX_SHIFT_X) as i32;
+    let top = 1i32 - pat.height().min(MAX_SHIFT_Y) as i32;
     let valid_shifts = RectRange::from_ranges(
-        left .. im.width() as i32,
-        top .. im.height() as i32
+        left .. im.width().min(MAX_SHIFT_X) as i32,
+        top .. im.height().min(MAX_SHIFT_Y) as i32
     ).unwrap();
 
     let sum_of_all_squares: u64 = im.enumerate_pixels()
