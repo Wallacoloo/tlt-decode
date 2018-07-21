@@ -115,13 +115,11 @@ fn show_im(im: &GrayImage) {
 /// by which two images _could_ differ, and normalized such that 1.0 indicates
 /// 100% matching images.
 fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
-    const MAX_SHIFT_X: u32 = 5;
-    const MAX_SHIFT_Y: u32 = 6;
-    let left = 1i32 - pat.width().min(MAX_SHIFT_X) as i32;
-    let top = 1i32 - pat.height().min(MAX_SHIFT_Y) as i32;
+    const MAX_SHIFT_X: i32 = 4;
+    const MAX_SHIFT_Y: i32 = 5;
     let valid_shifts = RectRange::from_ranges(
-        left .. im.width().min(MAX_SHIFT_X) as i32,
-        top .. im.height().min(MAX_SHIFT_Y) as i32
+        -MAX_SHIFT_X..MAX_SHIFT_X+1,
+        -MAX_SHIFT_Y..MAX_SHIFT_Y+1
     ).unwrap();
 
     let sum_of_all_squares: u64 = im.enumerate_pixels()
@@ -137,8 +135,8 @@ fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
         let overlapping = im_range.intersection(
             &pat_range.slide((x_shift, y_shift))
         );
-        let inner_product = overlapping.expect("tried to shift a pattern in an invalid way")
-            .iter()
+        let inner_product = overlapping.into_iter()
+            .flatten()
             .map(|(x, y)| {
                 let im_px = im.get_pixel(x as u32, y as u32).data[0];
                 let pat_px = pat.get_pixel((x - x_shift) as u32, (y - y_shift) as u32).data[0];
