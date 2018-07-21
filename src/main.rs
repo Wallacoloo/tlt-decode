@@ -50,6 +50,8 @@ lazy_static! {
 const UNICODE_FULL_BLOCK: &str = "█";
 /// Minimum confidence needed to classify a glyph.
 const MIN_CONFIDENCE: f32 = 0.99;
+/// Minimum value a pixel needs to be considered foreground.
+const FG_THRESHOLD: u8 = 85;
 
 /// Takes an image and OCRs the text inside it.
 /// Assumes the font is roughly a bitmap font and letters are arranged clearly into rows.
@@ -79,6 +81,11 @@ fn is_y_overlap(r0: &TypedRect<u32>, r1: &TypedRect<u32>) -> bool {
     // if r0 is wholly above or wholly below r1, then no intersection,
     // else intersection
     !(r0.max_y() < r1.min_y() || r0.min_y() > r1.max_y())
+}
+/// Returns whether `inside` is fully contained within `superset` if superset is extended
+/// infinitely on the vertical axis.
+fn is_x_fully_contained(inside: &TypedRect<u32>, superset: &TypedRect<u32>) -> bool {
+    inside.min_x() >= superset.min_x() && inside.max_x() <= superset.max_x()
 }
 
 /// Display the image to the console via ansi control codes/text.
@@ -194,7 +201,8 @@ fn arrange_regions_into_rows(regions: Vec<TypedRect<u32>>) -> Vec<Row> {
         let mut current_region: Option<TypedRect<u32>> = None;
         let mut new_row: Vec<TypedRect<u32>> = row.regions.drain(..).flat_map(|region| {
                 if let Some(r0) = current_region.take() {
-                    if is_x_overlap(&r0, &region) && !is_y_overlap(&r0, &region) {
+                    if is_x_overlap(&r0, &region) && !is_y_overlap(&r0, &region)
+                        || is_x_fully_contained(&region, &r0) {
                         // the two regions sit on top of eachother; likely the two halves
                         // of something like an 'i' or 'j'.
                         current_region = Some(r0.union(&region));
@@ -294,7 +302,7 @@ impl GlyphClassifier {
         println!("inverting/thresholding image");
         im.invert();
         let mut thresholded = im.to_luma();
-        threshold_mut(&mut thresholded, 85);
+        threshold_mut(&mut thresholded, FG_THRESHOLD);
         im.save(WORK_DIR.join("thresholded.png"))
             .expect("failed to save debug `im`");
 
