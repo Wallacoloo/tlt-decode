@@ -7,6 +7,7 @@ extern crate imageproc;
 #[macro_use]
 extern crate lazy_static;
 extern crate ordered_float;
+extern crate rayon;
 extern crate rect_iter;
 extern crate sha2;
 
@@ -29,6 +30,7 @@ use imageproc::{
     template_matching::{match_template, MatchTemplateMethod}
 };
 use ordered_float::NotNan;
+use rayon::prelude::*;
 use sha2::{Sha256, Digest};
 
 use std::{
@@ -263,7 +265,7 @@ impl GlyphClassifier {
     /// Match the glyph against all the previously labeled images and return
     /// the most likely match, in the form of (confidence between 0.0-1.0, decoded text).
     fn label_glyph(&self, im: &GrayImage) -> (f32, &str) {
-        self.known_glyphs.iter()
+        self.known_glyphs.par_iter()
             .filter_map(|(ref_im, ref_str)| {
                 let cor = cross_correlate_im(ref_im, im);
                 if !ref_str.is_empty() || cor == 1.0f32 {
