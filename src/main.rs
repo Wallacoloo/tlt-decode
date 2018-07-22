@@ -122,9 +122,9 @@ fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
         -MAX_SHIFT_Y..MAX_SHIFT_Y+1
     ).unwrap();
 
-    let sum_of_all_squares: u64 = im.enumerate_pixels()
-        .chain(pat.enumerate_pixels())
-        .map(|(_x, _y, v)|
+    let sum_of_all_squares: u64 = im.pixels()
+        .chain(pat.pixels())
+        .map(|v|
             v.data[0] as u64 * v.data[0] as u64
         ).sum::<u64>();
     let max_err = 255*255 * (im.width()*im.height() + pat.width()*pat.height()) as u64;
