@@ -1,4 +1,5 @@
 #![feature(nll)] // non-lexical lifetimes
+#![feature(drain_filter)]
 extern crate ansi_term;
 extern crate base64;
 extern crate euclid;
@@ -20,6 +21,7 @@ use euclid::{
     TypedRect
 };
 use image::{
+    GenericImage,
     GrayImage,
     Luma
 };
@@ -36,7 +38,7 @@ use std::{
     collections::BTreeMap,
     fs::{DirBuilder, File, read_dir},
     io::{stdin, Write},
-    ops::Deref,
+    ops::{Deref, Neg},
     path::{Path, PathBuf}
 };
 
@@ -88,6 +90,47 @@ fn is_x_fully_contained(inside: &TypedRect<u32>, superset: &TypedRect<u32>) -> b
     inside.min_x() >= superset.min_x() && inside.max_x() <= superset.max_x()
 }
 
+/// Paste whichever pixels of src overlap with dest when the upper-left of src
+/// is shifted to (x, y).
+fn copy_from_partial(dest: &mut GrayImage, src: &GrayImage, mut x: i32, mut y: i32) {
+    if x <= -(src.width() as i32) || y <= -(src.height() as i32)
+        || x >= dest.width() as i32 || y >= dest.height() as i32
+    {
+        // bounds check now to avoid future OOB.
+        return;
+    }
+    let mut subim = src.clone();
+    // subimage to ensure destination pixels are >= 0
+    if x < 0 {
+        subim = subim.sub_image((-x) as u32, 0, (subim.width() as i32 + x) as u32, subim.height())
+            .to_image();
+        x = 0;
+    }
+    if y < 0 {
+        subim = subim.sub_image(0, (-y) as u32, subim.width(), (subim.height() as i32 + y) as u32)
+            .to_image();
+        y = 0;
+    }
+    // subimage to ensure destination pixels are < dest.width() or dest.height()
+    if subim.width() as i32 + x > dest.width() as i32 {
+        subim = subim.sub_image(0, 0, (dest.width() as i32 - x) as u32, subim.height())
+            .to_image();
+    }
+    if subim.height() as i32 + y > dest.height() as i32 {
+        subim = subim.sub_image(0, 0, subim.width(), (dest.height() as i32 - y) as u32)
+            .to_image();
+    }
+    dest.copy_from(&subim, x as u32, y as u32);
+}
+
+fn sum_from_partial(dest: &mut GrayImage, src: &GrayImage, x: i32, y: i32) {
+    let mut intermediate = GrayImage::new(dest.width(), dest.height());
+    copy_from_partial(&mut intermediate, src, x, y);
+    for (d, i) in dest.pixels_mut().zip(intermediate.pixels()) {
+        d.data[0] = d.data[0].max(i.data[0]);
+    }
+}
+
 /// Display the image to the console via ansi control codes/text.
 fn show_im(im: &GrayImage) {
     for y in 0..im.height() {
@@ -115,8 +158,8 @@ fn show_im(im: &GrayImage) {
 /// by which two images _could_ differ, and normalized such that 1.0 indicates
 /// 100% matching images.
 fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
-    const MAX_SHIFT_X: i32 = 4;
-    const MAX_SHIFT_Y: i32 = 5;
+    const MAX_SHIFT_X: i32 = 2;
+    const MAX_SHIFT_Y: i32 = 2;
     let valid_shifts = RectRange::from_ranges(
         -MAX_SHIFT_X..MAX_SHIFT_X+1,
         -MAX_SHIFT_Y..MAX_SHIFT_Y+1
@@ -157,6 +200,53 @@ fn cross_correlate_im(im: &GrayImage, pat: &GrayImage) -> f32 {
         .max()
         .map(NotNan::into_inner)
         .unwrap_or(0f32)
+}
+
+/// given that im might contain _multiple_ glyphs, search for the pattern,
+/// only considering the error in the region which we actually overlap.
+/// For an image containing multiple glyphs, this identifies the first glyph with > 95% accuracy.
+/// Whe it fails, it's usually because it sees an 'l' shape too early and mislabels it
+/// as an 'l'. So, usually the correct result is in one of the top two ranked letters.
+///
+/// Returns the confidence (0.0 - 1.0) and the (x, y) shift of the pattern onto the image.
+fn locate_subimage(im: &GrayImage, pat: &GrayImage) -> (f32, (i32, i32)) {
+    // Consider all shifts which give at least partial overlap between the images.
+    // let valid_shifts = RectRange::from_ranges(
+    //     1 - pat.width() as i32..im.width() as i32,
+    //     1 - pat.height() as i32..im.height() as i32
+    // ).unwrap();
+    const MAX_SHIFT_X: i32 = 4;
+    const MAX_SHIFT_Y: i32 = 10; // for things like yS, the y needs to be shifted down.
+    let valid_shifts = RectRange::from_ranges(
+        -MAX_SHIFT_X..MAX_SHIFT_X+1,
+        -MAX_SHIFT_Y..MAX_SHIFT_Y+1
+    ).unwrap();
+
+    let max_err = 255*255 * (pat.width() * pat.height()) as u64;
+
+    let correlated_once = |(x_shift, y_shift) : (i32, i32)| -> f32 {
+        let cum_err = pat.enumerate_pixels()
+            .map(|(pat_x, pat_y, pat_p)| {
+                let im_x = pat_x as i32 + x_shift;
+                let im_y = pat_y as i32 + y_shift;
+                let im_p = if im_x >= 0 && im_x < im.width() as i32
+                    && im_y >= 0 && im_y < im.height() as i32
+                {
+                        im.get_pixel(im_x as u32, im_y as u32).data[0]
+                } else {
+                    0
+                };
+                let diff = im_p as i32 - pat_p.data[0] as i32;
+                (diff * diff) as u64
+            }).sum::<u64>();
+        (max_err - cum_err) as f32 / max_err as f32
+    };
+    valid_shifts.into_iter()
+        .map(|shift|
+             (NotNan::new(correlated_once(shift)).unwrap(), shift))
+        .max()
+        .map(|(cor, shift)| (cor.into_inner(), shift))
+        .unwrap_or((0f32, (0i32, 0i32)))
 }
 
 /// Given an image (one which has already been thresholded), find all disjoint sets
@@ -245,7 +335,9 @@ impl GlyphClassifier {
                     .expect("Unable to open glyph")
                     .to_luma();
                 (image, glyph_name)
-            });
+            })
+            .filter(|(_, g)| g.len() <= 1)
+            ;
         Self {
             known_glyphs: images.collect()
         }
@@ -276,20 +368,57 @@ impl GlyphClassifier {
     /// the most likely match, in the form of (confidence between 0.0-1.0, decoded text).
     fn label_glyph(&self, im: &GrayImage) -> (f32, &str) {
         self.known_glyphs.par_iter()
-            .filter_map(|(ref_im, ref_str)| {
-                let cor = cross_correlate_im(ref_im, im);
-                if !ref_str.is_empty() || cor == 1.0f32 {
-                    // Only decode to empty glyph if 100% match.
-                    // TODO: why do so many things decode to empty glyphs
-                    // if this is omitted?
-                    Some((NotNan::new(cor).unwrap(), ref_str.deref()))
-                } else {
-                    None
-                }
+            .map(|(pat, pat_str)| {
+                let cor = cross_correlate_im(im, pat);
+                (NotNan::new(cor).unwrap(), pat_str.deref())
             })
             .max()
             .map(|(correlation, decoded)| (correlation.into_inner(), decoded))
             .unwrap_or((0f32, ""))
+    }
+    fn label_multiglyph_kernel(&self, im: &GrayImage) -> (NotNan<f32>, String, GrayImage) {
+        // Try to find the first character in the image
+        let mut best_guesses = self.locate_subimage(im);
+        // For each of the best first letters, attempt to find corresponding successor letters.
+        best_guesses.drain(..3).map(|(rank, chr, pat, shift)| {
+            println!("Guessing {:?}", (rank, chr, shift));
+            let right = ((shift.0 + pat.width() as i32) as u32)
+                .saturating_sub(2); // allow some overlap between characters
+            let mut matched_im = GrayImage::new(im.width(), im.height());
+            copy_from_partial(&mut matched_im, pat, shift.0, shift.1);
+            if right+3 < im.width() {
+                let rest_region = im.clone().sub_image(right, 0, im.width()-right, im.height())
+                    .to_image();
+                let (rest_rank, rest_str, rest_im) = self.label_multiglyph_kernel(&rest_region);
+                sum_from_partial(&mut matched_im, &rest_im, right as i32, 0);
+                (rank*rest_rank, chr.to_owned() + &rest_str, matched_im)
+            } else {
+                (rank, chr.to_owned(), matched_im)
+            }
+        }).max_by_key(|(rank, _, _)| rank.clone())
+        .unwrap()
+    }
+    fn label_multiglyph(&self, im: &GrayImage) -> (f32, String) {
+        let (rank, s, pat) = self.label_multiglyph_kernel(im);
+        let real_rank = cross_correlate_im(im, &pat);
+        println!("multiglyph '{}': dumb rank {:?} refined to {:?}", s, rank, real_rank);
+        show_im(&pat);
+        (real_rank, s)
+    }
+    fn locate_subimage(&self, im: &GrayImage) -> Vec<(NotNan<f32>, &str, &GrayImage, (i32, i32))> {
+        let mut correlations: Vec<_> = self.known_glyphs.par_iter()
+            .filter(|(_pat, pat_str)| pat_str != "")
+            .map(|(pat, pat_str)| {
+                let (cor, shift) = locate_subimage(im, pat);
+                (NotNan::new(cor).unwrap(), pat_str.deref(), pat, shift)
+            })
+            .collect();
+        correlations.sort_unstable_by_key(|(rank, chr, _im, _shift)|
+            (chr.clone(), rank.neg())
+        );
+        correlations.dedup_by_key(|(_rank, chr, _im, _shift)| chr.clone());
+        correlations.sort_by_key(|(rank, _chr, _im, _shift)| rank.neg());
+        correlations
     }
     /// Take an image of multiple lines of text and OCR the whole thing.
     fn label_page<P: AsRef<Path>>(&mut self, file: P) -> String {
@@ -332,6 +461,9 @@ impl GlyphClassifier {
                     decoded.to_owned()
                 } else {
                     println!("confidence doesn't meet threshold for glyph at row {}, col {}", row_idx, col_idx);
+                    println!("Attempting to decode as a multi-character glyph");
+                    let (multi_rank, multi_decoded) = self.label_multiglyph(&as_luma);
+                    println!("Decoded multi-glyph to '{}' with {} confidence", multi_decoded, multi_rank);
                     self.have_user_label_image(as_luma)
                 };
                 cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded.replace("/", "_"))))
