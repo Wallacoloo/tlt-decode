@@ -92,35 +92,24 @@ fn is_x_fully_contained(inside: &TypedRect<u32>, superset: &TypedRect<u32>) -> b
 
 /// Paste whichever pixels of src overlap with dest when the upper-left of src
 /// is shifted to (x, y).
-fn copy_from_partial(dest: &mut GrayImage, src: &GrayImage, mut x: i32, mut y: i32) {
-    if x <= -(src.width() as i32) || y <= -(src.height() as i32)
-        || x >= dest.width() as i32 || y >= dest.height() as i32
-    {
-        // bounds check now to avoid future OOB.
-        return;
+fn copy_from_partial(dest: &mut GrayImage, src: &GrayImage, x: i32, y: i32) {
+    let src_left = (-x).max(0);
+    let src_top = (-y).max(0);
+    let src_right = (src.width() as i32).min(dest.width() as i32 - x);
+    let src_bot = (src.height() as i32).min(dest.height() as i32 - y);
+    let dest_left = x.max(0);
+    let dest_top = y.max(0);
+    if src_right <= src_left || src_bot <= src_top {
+        return; // region of pixels to copy is empty, could otherwise trigger OOB.
     }
-    let mut subim = src.clone();
-    // subimage to ensure destination pixels are >= 0
-    if x < 0 {
-        subim = subim.sub_image((-x) as u32, 0, (subim.width() as i32 + x) as u32, subim.height())
-            .to_image();
-        x = 0;
-    }
-    if y < 0 {
-        subim = subim.sub_image(0, (-y) as u32, subim.width(), (subim.height() as i32 + y) as u32)
-            .to_image();
-        y = 0;
-    }
-    // subimage to ensure destination pixels are < dest.width() or dest.height()
-    if subim.width() as i32 + x > dest.width() as i32 {
-        subim = subim.sub_image(0, 0, (dest.width() as i32 - x) as u32, subim.height())
-            .to_image();
-    }
-    if subim.height() as i32 + y > dest.height() as i32 {
-        subim = subim.sub_image(0, 0, subim.width(), (dest.height() as i32 - y) as u32)
-            .to_image();
-    }
-    dest.copy_from(&subim, x as u32, y as u32);
+    let mut src = src.clone();
+    let src_subim = src.sub_image(
+        src_left as u32,
+        src_top as u32,
+        (src_right - src_left) as u32,
+        (src_bot - src_top) as u32
+    );
+    dest.copy_from(&src_subim, dest_left as u32, dest_top as u32);
 }
 
 fn sum_from_partial(dest: &mut GrayImage, src: &GrayImage, x: i32, y: i32) {
@@ -381,7 +370,6 @@ impl GlyphClassifier {
         let mut best_guesses = self.locate_subimage(im);
         // For each of the best first letters, attempt to find corresponding successor letters.
         best_guesses.drain(..3).map(|(rank, chr, pat, shift)| {
-            println!("Guessing {:?}", (rank, chr, shift));
             let right = ((shift.0 + pat.width() as i32) as u32)
                 .saturating_sub(2); // allow some overlap between characters
             let mut matched_im = GrayImage::new(im.width(), im.height());
@@ -399,10 +387,9 @@ impl GlyphClassifier {
         .unwrap()
     }
     fn label_multiglyph(&self, im: &GrayImage) -> (f32, String) {
-        let (rank, s, pat) = self.label_multiglyph_kernel(im);
+        let (_rank, s, pat) = self.label_multiglyph_kernel(im);
+        // TODO: pat should be trimmed to not have any white border.
         let real_rank = cross_correlate_im(im, &pat);
-        println!("multiglyph '{}': dumb rank {:?} refined to {:?}", s, rank, real_rank);
-        show_im(&pat);
         (real_rank, s)
     }
     fn locate_subimage(&self, im: &GrayImage) -> Vec<(NotNan<f32>, &str, &GrayImage, (i32, i32))> {
@@ -463,8 +450,12 @@ impl GlyphClassifier {
                     println!("confidence doesn't meet threshold for glyph at row {}, col {}", row_idx, col_idx);
                     println!("Attempting to decode as a multi-character glyph");
                     let (multi_rank, multi_decoded) = self.label_multiglyph(&as_luma);
-                    println!("Decoded multi-glyph to '{}' with {} confidence", multi_decoded, multi_rank);
-                    self.have_user_label_image(as_luma)
+                    println!("decoding multi-glyph gives '{}' with {} confidence", multi_decoded, multi_rank);
+                    if multi_rank >= MIN_CONFIDENCE {
+                        multi_decoded
+                    } else {
+                        self.have_user_label_image(as_luma)
+                    }
                 };
                 cropped.save(SEGMENTS_DIR.join(format!("{:03}-{:03}-{}.png", row_idx, col_idx, decoded.replace("/", "_"))))
                     .expect("failed to save debug `cropped`");
